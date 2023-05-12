@@ -826,20 +826,19 @@ static bool isRelroSection(const OutputSection *sec) {
 // * It is easy to check if a give branch was taken.
 // * It is easy two see how similar two ranks are (see getRankProximity).
 enum RankFlags {
-  RF_NOT_ADDR_SET = 1 << 27,
-  RF_NOT_ALLOC = 1 << 26,
-  RF_PARTITION = 1 << 18, // Partition number (8 bits)
-  RF_NOT_PART_EHDR = 1 << 17,
-  RF_NOT_PART_PHDR = 1 << 16,
-  RF_NOT_INTERP = 1 << 15,
-  RF_NOT_NOTE = 1 << 14,
-  RF_WRITE = 1 << 13,
-  RF_EXEC_WRITE = 1 << 12,
-  RF_EXEC = 1 << 11,
-  RF_RODATA = 1 << 10,
-  RF_NOT_RELRO = 1 << 9,
-  RF_NOT_TLS = 1 << 8,
-  RF_BSS = 1 << 7,
+  RF_NOT_ADDR_SET = 1 << 26,
+  RF_NOT_ALLOC = 1 << 25,
+  RF_PARTITION = 1 << 17, // Partition number (8 bits)
+  RF_NOT_PART_EHDR = 1 << 16,
+  RF_NOT_PART_PHDR = 1 << 15,
+  RF_NOT_INTERP = 1 << 14,
+  RF_NOT_NOTE = 1 << 13,
+  RF_WRITE = 1 << 12,
+  RF_EXEC = 1 << 11, // Sense flipped if RF_WRITE
+  RF_NOT_RELRO = 1 << 10,
+  RF_NOT_TLS = 1 << 9,
+  RF_NOBITS = 1 << 8,
+  RF_PROGBITS_RODATA = 1 << 7,
   RF_PPC_TOC = 1 << 4,
   RF_PPC_GOT = 1 << 3,
   RF_PPC_BRANCH_LT = 1 << 2,
@@ -884,56 +883,66 @@ static unsigned getSectionRank(const OutputSection &osec) {
     return rank;
   rank |= RF_NOT_NOTE;
 
-  // Sort sections based on their access permission in the following
-  // order: R, RX, RWX, RW.  This order is based on the following
-  // considerations:
-  // * Read-only sections come first such that they go in the
-  //   PT_LOAD covering the program headers at the start of the file.
-  // * Read-only, executable sections come next.
-  // * Writable, executable sections follow such that .plt on
-  //   architectures where it needs to be writable will be placed
-  //   between .text and .data.
-  // * Writable sections come last, such that .bss lands at the very
-  //   end of the last PT_LOAD.
+  // Sort sections in the following order, after the headers:
+  //   R, RX, RWX, RelRo-RW, RW
+  //
+  // The order is based on the following considerations:
+  //
+  // * We want to keep the number of LOAD segments required as low as possible;
+  //   this reduces overheads due to alignment and mmap regions.
+  //
+  // * The program headers and interp/note sections at the front of the file are
+  //   readonly; putting other readonly sections first lets us share the same
+  //   segment.
+  //
+  // * Read-only, executable sections should be neighboring read-only
+  //   non-executable, because if --no-rosegment is used, they can both share an
+  //   RX segment.
+  //
+  // * Writable, executable sections follow, such that .plt on architectures
+  //   where it needs to be writable will be placed between .text and
+  //   .data. (FIXME: what is this referring to?)
+
   bool isExec = osec.flags & SHF_EXECINSTR;
   bool isWrite = osec.flags & SHF_WRITE;
 
-  if (isExec) {
-    if (isWrite)
-      rank |= RF_EXEC_WRITE;
-    else
-      rank |= RF_EXEC;
-  } else if (isWrite) {
-    rank |= RF_WRITE;
-  } else if (osec.type == SHT_PROGBITS) {
-    // Make non-executable and non-writable PROGBITS sections (e.g .rodata
-    // .eh_frame) closer to .text. They likely contain PC or GOT relative
-    // relocations and there could be relocation overflow if other huge sections
-    // (.dynstr .dynsym) were placed in between.
-    rank |= RF_RODATA;
-  }
 
-  // Place RelRo sections first. After considering SHT_NOBITS below, the
-  // ordering is PT_LOAD(PT_GNU_RELRO(.data.rel.ro .bss.rel.ro) | .data .bss),
-  // where | marks where page alignment happens. An alternative ordering is
-  // PT_LOAD(.data | PT_GNU_RELRO( .data.rel.ro .bss.rel.ro) | .bss), but it may
-  // waste more bytes due to 2 alignment places.
+  if (isWrite)
+    rank |= RF_WRITE;
+
+  if (isExec ^ isWrite)
+    rank |= RF_EXEC;
+
+  // Place RW RelRo sections before other RW sections. (Note: even though relro
+  // is RW, it gets its own LOAD segment and page-alignment, so that it can be
+  // marked RO at startup).
   if (!isRelroSection(&osec))
     rank |= RF_NOT_RELRO;
 
-  // If we got here we know that both A and B are in the same PT_LOAD.
+  // After this point, we are now sorting within a PT_LOAD segment.
 
   // The TLS initialization block needs to be a single contiguous block in a R/W
   // PT_LOAD, so stick TLS sections directly before the other RelRo R/W
-  // sections. Since p_filesz can be less than p_memsz, place NOBITS sections
-  // after PROGBITS.
+  // sections. Note that TLS NOBITS is very special and doesn't need to be
+  // represented in VA space or by the PT_LOAD. Thus we can -- uniquely -- have
+  // it in the middle of a PT_LOAD without binary-size overhead!
   if (!(osec.flags & SHF_TLS))
     rank |= RF_NOT_TLS;
 
-  // Within TLS sections, or within other RelRo sections, or within non-RelRo
-  // sections, place non-NOBITS sections first.
+  // After accounting for the TLS special case, place NOBITS sections last
+  // within each segment, so that we can take advantage of PT_LOAD p_filesz <
+  // p_memsz.
   if (osec.type == SHT_NOBITS)
-    rank |= RF_BSS;
+    rank |= RF_NOBITS;
+
+  if (!isWrite && !isExec && osec.type == SHT_PROGBITS) {
+    // Place RO PROGBITS sections later than other miscellaneous section types like
+    // SHT_DYNSYM/etc. This results in sections like .rodata .eh_frame being
+    // closer to .text. They likely contain PC or GOT relative relocations and
+    // there could be relocation overflow if other huge sections (.dynstr
+    // .dynsym) were placed in between.
+    rank |= RF_PROGBITS_RODATA;
+  }
 
   // Some architectures have additional ordering restrictions for sections
   // within the same PT_LOAD.

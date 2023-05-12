@@ -26,12 +26,14 @@ _start:
 .section e,"awT"
 .section d,"ax",@nobits
 .section c,"ax"
-.section a,"a",@nobits
+.section a1,"a",@llvm_odrtab
+.section a2,"a",@nobits
 .section b,"a"
 
-// For non-executable and non-writable sections, PROGBITS appear after others.
-// CHECK: Name: a
+// For non-executable and non-writable sections, PROGBITS appear after other types (except NOBITS).
+// CHECK: Name: a1
 // CHECK: Name: b
+// CHECK: Name: a2
 
 // CHECK: Name: c
 // CHECK: Name: d
@@ -47,7 +49,6 @@ _start:
 
 // Writable sections appear after TLS and other relro sections.
 // CHECK: Name: i
-
 // CHECK: Name: j
 
 // Non allocated sections are in input order.
