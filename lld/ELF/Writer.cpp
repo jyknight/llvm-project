@@ -2356,16 +2356,27 @@ SmallVector<PhdrEntry *, 0> Writer<ELFT>::createPhdrs(Partition &part) {
     // Segments are contiguous memory regions that has the same attributes
     // (e.g. executable or writable). There is one phdr for each segment.
     // Therefore, we need to create a new phdr when the next section has
-    // different flags or is loaded at a discontiguous address or memory
-    // region using AT or AT> linker script command, respectively. At the same
-    // time, we don't want to create a separate load segment for the headers,
-    // even if the first output section has an AT or AT> attribute.
+    // different flags or is loaded at a discontiguous address or memory region
+    // using AT or AT> linker script command, respectively.
+    //
+    // As an exception, we don't create a separate load segment for the elf
+    // headers, even if the first "real" output has an AT or AT> attribute.
+    //
+    // In addition, NOBITS sections should only be placed at the end of a LOAD
+    // segment (since it's represented as p_filesz < p_memsz). If we have a
+    // not-NOBITS section after a NOBITS, we create a new LOAD for the latter
+    // even if flags match, so as not to require actually writing the
+    // supposed-to-be-NOBITS section to the output file. (However, we cannot do
+    // so when hasSectionsCommand, since we cannot introduce the extra alignment
+    // needed to create a new LOAD, in that case.)
     uint64_t newFlags = computeFlags(sec->getPhdrFlags());
     bool sameLMARegion =
         load && !sec->lmaExpr && sec->lmaRegion == load->firstSec->lmaRegion;
     if (!(load && newFlags == flags && sec != relroEnd &&
           sec->memRegion == load->firstSec->memRegion &&
-          (sameLMARegion || load->lastSec == Out::programHeaders))) {
+          (sameLMARegion || load->lastSec == Out::programHeaders) &&
+          (script->hasSectionsCommand || sec->type == SHT_NOBITS ||
+           load->lastSec->type != SHT_NOBITS))) {
       load = addHdr(PT_LOAD, newFlags);
       flags = newFlags;
     }
