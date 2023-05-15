@@ -818,6 +818,10 @@ static bool isRelroSection(const OutputSection *sec) {
          s == ".openbsd.randomdata" || s == ".preinit_array";
 }
 
+static bool isLargeSection(const OutputSection &osec) {
+  return (config->emachine == EM_X86_64 && osec.flags & SHF_X86_64_LARGE);
+}
+
 // We compute a rank for each section. The rank indicates where the
 // section should be placed in the file.  Instead of using simple
 // numbers (0,1,2...), we use a series of flags. One for each decision
@@ -826,14 +830,16 @@ static bool isRelroSection(const OutputSection *sec) {
 // * It is easy to check if a give branch was taken.
 // * It is easy two see how similar two ranks are (see getRankProximity).
 enum RankFlags {
-  RF_NOT_ADDR_SET = 1 << 26,
-  RF_NOT_ALLOC = 1 << 25,
-  RF_PARTITION = 1 << 17, // Partition number (8 bits)
-  RF_NOT_PART_EHDR = 1 << 16,
-  RF_NOT_PART_PHDR = 1 << 15,
-  RF_NOT_INTERP = 1 << 14,
-  RF_NOT_NOTE = 1 << 13,
-  RF_WRITE = 1 << 12,
+  RF_NOT_ADDR_SET = 1 << 28,
+  RF_NOT_ALLOC = 1 << 27,
+  RF_PARTITION = 1 << 19, // Partition number (8 bits)
+  RF_NOT_PART_EHDR = 1 << 18,
+  RF_NOT_PART_PHDR = 1 << 17,
+  RF_NOT_INTERP = 1 << 16,
+  RF_NOT_NOTE = 1 << 15,
+  RF_NOT_LARGE_PRE = 1 << 14,
+  RF_LARGE = 1 << 13,
+  RF_WRITE = 1 << 12, // Sense flipped if RF_LARGE
   RF_EXEC = 1 << 11, // Sense flipped if RF_WRITE
   RF_NOT_RELRO = 1 << 10,
   RF_NOT_TLS = 1 << 9,
@@ -884,7 +890,9 @@ static unsigned getSectionRank(const OutputSection &osec) {
   rank |= RF_NOT_NOTE;
 
   // Sort sections in the following order, after the headers:
-  //   R, RX, RWX, RelRo-RW, RW
+  //   Large-R, R, RX, RWX, RelRo-RW, RW, Large-RW, Large-RWX, Large-RX
+  // For most programs, you'll have only:
+  //   R, RX, RelRo-RW, RW
   //
   // The order is based on the following considerations:
   //
@@ -902,15 +910,25 @@ static unsigned getSectionRank(const OutputSection &osec) {
   // * Writable, executable sections follow, such that .plt on architectures
   //   where it needs to be writable will be placed between .text and
   //   .data. (FIXME: what is this referring to?)
+  //
+  // * Sections marked "large" are used to avoid relocation overflow, and thus
+  //   MUST be placed either before or after other sections.  This necessarily
+  //   overrides some of the other preferences. However, the presence of large
+  //   sections is rare, and executable large sections are even more rare.
 
   bool isExec = osec.flags & SHF_EXECINSTR;
   bool isWrite = osec.flags & SHF_WRITE;
+  bool isLarge = isLargeSection(osec);
+  // Large-R section goes first.
+  if (!(isLarge && !isWrite && !isExec))
+    rank |= RF_NOT_LARGE_PRE;
+  if (isLarge)
+    rank |= RF_LARGE;
 
-
-  if (isWrite)
+  if (isWrite ^ isLarge)
     rank |= RF_WRITE;
 
-  if (isExec ^ isWrite)
+  if (isExec ^ isWrite ^ isLarge)
     rank |= RF_EXEC;
 
   // Place RW RelRo sections before other RW sections. (Note: even though relro

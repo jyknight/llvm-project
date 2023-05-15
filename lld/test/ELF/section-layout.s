@@ -9,6 +9,15 @@
 .text
 _start:
 
+.section u1,"axl",@nobits
+.section u2,"axl"
+.section v1,"awl",@nobits
+.section v2,"awl"
+.section w1,"awxl",@nobits
+.section w2,"awxl"
+.section x1,"al",@nobits
+.section x2,"al"
+
 .section t,"x",@nobits
 .section s,"x"
 .section r,"w",@nobits
@@ -30,6 +39,10 @@ _start:
 .section a2,"a",@nobits
 .section b,"a"
 
+// Large rodata goes first
+// CHECK: Name: x2
+// CHECK: Name: x1
+
 // For non-executable and non-writable sections, PROGBITS appear after other types (except NOBITS).
 // CHECK: Name: a1
 // CHECK: Name: b
@@ -50,6 +63,14 @@ _start:
 // Writable sections appear after TLS and other relro sections.
 // CHECK: Name: i
 // CHECK: Name: j
+
+// Other largedata sections go at the end
+// CHECK: Name: v2
+// CHECK: Name: v1
+// CHECK: Name: w2
+// CHECK: Name: w1
+// CHECK: Name: u2
+// CHECK: Name: u1
 
 // Non allocated sections are in input order.
 // CHECK: Name: t
