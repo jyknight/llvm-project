@@ -229,7 +229,9 @@ int fstat(int fd, StatT *buf) {
 
 int mkdir(const wchar_t *path, int permissions) {
   (void)permissions;
-  return _wmkdir(path);
+  if (!CreateDirectoryW(path, nullptr))
+    return set_errno();
+  return 0;
 }
 
 int symlink_file_dir(const wchar_t *oldname, const wchar_t *newname,
@@ -304,11 +306,11 @@ int rename(const wchar_t *from, const wchar_t *to) {
   return 0;
 }
 
-template <class... Args> int open(const wchar_t *filename, Args... args) {
-  return _wopen(filename, args...);
+int chdir(const wchar_t* path) {
+  if (!SetCurrentDirectoryW(path))
+    return set_errno();
+  return 0;
 }
-int close(int fd) { return _close(fd); }
-int chdir(const wchar_t *path) { return _wchdir(path); }
 
 struct StatVFS {
   uint64_t f_frsize;
@@ -343,7 +345,25 @@ int statvfs(const wchar_t *p, StatVFS *buf) {
   return 0;
 }
 
-wchar_t *getcwd(wchar_t *buff, size_t size) { return _wgetcwd(buff, size); }
+wchar_t* getcwd(wchar_t* in_buf, size_t in_size) {
+  // Only expected to be used with us allocating the buffer.
+  _LIBCPP_ASSERT(in_buf == nullptr, "Windows getcwd() assumes in_buf==nullptr");
+  _LIBCPP_ASSERT(in_size == 0, "Windows getcwd() assumes in_size==0");
+
+  size_t buff_size = MAX_PATH + 10;
+  std::unique_ptr<wchar_t, decltype(&::free)> buff(static_cast<wchar_t*>(malloc(buff_size * sizeof(wchar_t))), &::free);
+  DWORD retval = GetCurrentDirectoryW(buff_size, buff.get());
+  if (retval > buff_size) {
+    buff_size = retval;
+    buff.reset(static_cast<wchar_t*>(malloc(buff_size * sizeof(wchar_t))));
+    retval = GetCurrentDirectoryW(buff_size, buff.get());
+  }
+  if (!retval) {
+    set_errno();
+    return nullptr;
+  }
+  return buff.release();
+}
 
 wchar_t *realpath(const wchar_t *path, wchar_t *resolved_name) {
   // Only expected to be used with us allocating the buffer.
@@ -486,7 +506,6 @@ int symlink_dir(const char *oldname, const char *newname) {
   return ::symlink(oldname, newname);
 }
 using ::chdir;
-using ::close;
 using ::fchmod;
 #if defined(AT_SYMLINK_NOFOLLOW) && defined(AT_FDCWD)
 using ::fchmodat;
@@ -497,7 +516,6 @@ using ::getcwd;
 using ::link;
 using ::lstat;
 using ::mkdir;
-using ::open;
 using ::readlink;
 using ::realpath;
 using ::remove;
