@@ -58,11 +58,6 @@ _LIBCPP_BEGIN_NAMESPACE_FILESYSTEM
 
 namespace detail {
 
-#if defined(_LIBCPP_WIN32API)
-// Non anonymous, to allow access from two translation units.
-errc __win_err_to_errc(int err);
-#endif
-
 namespace {
 
 static _LIBCPP_ATTRIBUTE_FORMAT(__printf__, 1, 0) string
@@ -108,16 +103,21 @@ format_string(const char* msg, ...) {
   return ret;
 }
 
+// On windows, libc functions use errno, but system functions use GetLastError.
+// So, callers need to be careful which of these next functions they call!
+
 error_code capture_errno() {
   _LIBCPP_ASSERT(errno != 0, "Expected errno to be non-zero");
   return error_code(errno, generic_category());
 }
 
+error_code get_last_error() {
 #if defined(_LIBCPP_WIN32API)
-error_code make_windows_error(int err) {
-  return make_error_code(__win_err_to_errc(err));
-}
+  return std::error_code(GetLastError(), std::system_category());
+#else
+  return capture_errno();
 #endif
+}
 
 template <class T>
 T error_value();
